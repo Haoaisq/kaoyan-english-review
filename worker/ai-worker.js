@@ -1,7 +1,7 @@
 // Cloudflare Worker — deploy as a Worker, not GitHub Pages.
-// Required Secrets: OPENAI_API_KEY, APP_PASSWORD
+// Required Secrets: DEEPSEEK_API_KEY, APP_PASSWORD
 const ALLOWED_ORIGIN = "https://haoaisq.github.io";
-const MODEL = "gpt-4.1-mini";
+const MODEL = "deepseek-flash";
 const LIMIT_BYTES = 18000;
 const PROMPT = `你是严谨、耐心的考研英语阅读导师。专长于英语一/二阅读篇章逻辑、长难句、干扰项与错因归纳。
 请完全使用中文，关键英语短语可保留英语。禁止编造原文或题干。用户若只提供年份和题号却未提供可靠原文/题干和四个选项，应先说明信息不足，要求粘贴原文关键段、题干、选项；不能凭记忆自信复述原题。
@@ -14,7 +14,7 @@ const origin=request.headers.get("Origin");
 if(origin!==ALLOWED_ORIGIN)return json({error:"Origin not allowed"},403);
 if(request.method==="OPTIONS")return new Response(null,{status:204,headers:{"access-control-allow-origin":ALLOWED_ORIGIN,"access-control-allow-methods":"POST, OPTIONS","access-control-allow-headers":"Content-Type, X-App-Password","access-control-max-age":"600","vary":"Origin"}});
 if(request.method!=="POST")return json({error:"POST only"},405);
-if(!env.OPENAI_API_KEY||!env.APP_PASSWORD)return json({error:"Worker secrets not configured"},503);
+if(!env.DEEPSEEK_API_KEY||!env.APP_PASSWORD)return json({error:"Worker secrets not configured"},503);
 if(!safeEqual(request.headers.get("X-App-Password")||"",env.APP_PASSWORD))return json({error:"访问口令错误"},401);
 if(Number(request.headers.get("content-length")||0)>LIMIT_BYTES)return json({error:"请求过长"},413);
 let b;try{const raw=await request.text();if(raw.length>LIMIT_BYTES)return json({error:"请求过长"},413);b=JSON.parse(raw)}catch{return json({error:"JSON格式错误"},400)}
@@ -22,10 +22,10 @@ const context=String(b.context||"").slice(0,8500),message=String(b.message||"").
 if(!message.trim())return json({error:"请输入要分析的问题"},400);
 const history=Array.isArray(b.history)?b.history.slice(-6).filter(m=>["user","assistant"].includes(m.role)&&typeof m.content==="string").map(m=>({role:m.role,content:m.content.slice(0,1500)})):[];
 const input=[{role:"user",content:"本题资料（由用户提供，不一定完整）：\n"+context},...history,{role:"user",content:message}];
-try{const resp=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{"authorization":"Bearer "+env.OPENAI_API_KEY,"content-type":"application/json"},body:JSON.stringify({model:MODEL,instructions:PROMPT,input,max_output_tokens:1600,store:false})});
+try{const resp=await fetch("https://api.deepseek.com/chat/completions",{method:"POST",headers:{"authorization":"Bearer "+env.DEEPSEEK_API_KEY,"content-type":"application/json"},body:JSON.stringify({model:MODEL,messages:[{role:"system",content:PROMPT},...input],max_tokens:1800,thinking:{type:"disabled"},stream:false})});
 const val=await resp.json().catch(()=>({}));
-if(!resp.ok)return json({error:resp.status===429?"AI服务繁忙或额度不足":resp.status===401?"OpenAI API 密钥无效":"AI请求失败 ("+resp.status+")"},resp.status===429?429:502);
-const output=(val.output||[]).flatMap(x=>x.type==="message"?(x.content||[]):[]).filter(x=>x.type==="output_text").map(x=>x.text).join("\n");
+if(!resp.ok)return json({error:resp.status===429?"AI服务繁忙或额度不足":resp.status===401?"DeepSeek API 密钥无效":"AI请求失败 ("+resp.status+")"},resp.status===429?429:502);
+const output=String(val.choices?.[0]?.message?.content||"");
 if(!output)return json({error:"AI没有返回可显示的文字，请重试"},502);
 return json({answer:output,model:MODEL,usage:val.usage||null});
 }catch{return json({error:"连接 AI 服务失败"},502)}
