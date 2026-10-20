@@ -12,6 +12,23 @@ const PROMPT = `你是考研英语（一）阅读错题思维诊断教练，专�
 【追问式诊断流程】优先读取题号、年份、题型、错选、参考答案、思路描述、已确认错因。没给原文题干选项时，不要声称已读取该题或从题号自动知道具体内容。以一个最有区分度的问题开始，尽量给出简短选项，始终允许“不记得/无法判断”；例如“当时主要被原文重复词吸引，还是看到了句意的同义改写？”、“是没发现题干限制，还是理解了限制但选项范围没比较？”；根据用户回答不断更新假设，不重复已问问题。必要时请求最小限度的关键词或选项差异证据，不要求完整文章。
 【诊断输出】能判断时按“候选思维漏洞—证据—其他可能性—下一问/验证训练”给出；证据不足就标记“暂无法判断”，不贴确定标签。可建议错因标签：定位偏差、关键词匹配依赖、同义改写未识别、题干限定忽视、选项范围扩大、偷换概念未察觉、信息拼凑未察觉、逻辑转折忽视、因果混淆、例证与观点混淆、主旨与细节混淆、时间线误判、推理越界、词汇障碍、长难句理解、时间压力、未能辨别、其他；不把候选标签自动当成用户确认的事实。
 【长期画像】已有人工确认标签仅代表用户历史记录，保留样本数和时间；少量案例只可称待验证迹象，不可声称掌握真实错误率（缺少全部作答量分母）。如用户仅问错因，避免主动长篇讲题或逐项解析答案。回答用简洁中文，一轮至多追问一个关键问题，严禁编造题目、引文、统计数据和用户经历。`;
+// D1 knowledge base is optional. Without a binding or before importing rows, legacy diagnosis still works.
+async function retrieveKnowledge(db,context,message){
+ if(!db)return [];
+ try {
+  const result=await db.prepare("SELECT id, source_section, source_page, title, category, tags, method, diagnostic_question, exercise, caution FROM knowledge_units LIMIT 100").all();
+  const rows=Array.isArray(result?.results)?result.results:[];
+  const source=(context+"\n"+message).slice(0,9000).toLowerCase();
+  const scored=rows.map(row=>{
+   const tags=String(row.tags||"").split(",").map(x=>x.trim().toLowerCase()).filter(Boolean);
+   const score=tags.reduce((n,t)=>n+(source.includes(t)?(t.length>=3?3:1):0),0)
+    +(source.includes(String(row.category||"").toLowerCase())?2:0)
+    +(source.includes(String(row.title||"").toLowerCase())?4:0);
+   return {row,score};
+  }).sort((a,b)=>b.score-a.score||a.row.id.localeCompare(b.row.id));
+  return scored.filter(x=>x.score>0).slice(0,3).map(x=>x.row);
+ }catch(e){console.warn("D1 knowledge retrieval skipped",String(e));return []}
+}
 function json(body,status=200,origin=ALLOWED_ORIGIN){return new Response(JSON.stringify(body),{status,headers:{"content-type":"application/json; charset=utf-8","access-control-allow-origin":origin,"vary":"Origin","cache-control":"no-store","x-content-type-options":"nosniff"}})}
 function safeEqual(a,b){const x=new TextEncoder().encode(a),y=new TextEncoder().encode(b);let d=x.length^y.length;for(let i=0;i<Math.max(x.length,y.length);i++)d|=(x[i]||0)^(y[i]||0);return d===0}
 export default {async fetch(request,env){
@@ -26,7 +43,11 @@ let b;try{const raw=await request.text();if(raw.length>LIMIT_BYTES)return json({
 const context=String(b.context||"").slice(0,8500),message=String(b.message||"").slice(0,1600);
 if(!message.trim())return json({error:"请输入要分析的问题"},400);
 const history=Array.isArray(b.history)?b.history.slice(-6).filter(m=>["user","assistant"].includes(m.role)&&typeof m.content==="string").map(m=>({role:m.role,content:m.content.slice(0,1500)})):[];
-const input=[{role:"user",content:"本题资料（由用户提供，不一定完整）：\n"+context},...history,{role:"user",content:message}];
+const knowledge=await retrieveKnowledge(env.KNOWLEDGE_DB,context,message+"\n"+history.map(x=>x.content).join("\n"));
+const knowledgeContext=knowledge.length?"\n\n[私有知识库检索结果：由用户提供的《糖三角》讲义提炼]\n"+knowledge.map(k=>
+ "知识点："+k.title+"（讲义第"+k.source_page+"页，第"+k.source_section+"节；编号"+k.id+"）\n方法："+k.method+"\n辨别式追问："+k.diagnostic_question+"\n练习："+k.exercise+"\n适用边界："+k.caution
+).join("\n\n"):"";
+const input=[{role:"user",content:"本题资料（由用户提供，不一定完整）：\n"+context+knowledgeContext},...history,{role:"user",content:message}];
 try{const resp=await fetch("https://api.deepseek.com/chat/completions",{method:"POST",headers:{"authorization":"Bearer "+env.DEEPSEEK_API_KEY,"content-type":"application/json"},body:JSON.stringify({model:MODEL,messages:[{role:"system",content:PROMPT},...input],max_tokens:1800,thinking:{type:"disabled"},stream:false})});
 const val=await resp.json().catch(()=>({}));
 if(!resp.ok)return json({error:resp.status===429?"AI服务繁忙或额度不足":resp.status===401?"DeepSeek API 密钥无效":"AI请求失败 ("+resp.status+")"},resp.status===429?429:502);
